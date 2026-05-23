@@ -1,0 +1,130 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: parabench_db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-parabench}
+      POSTGRES_USER: ${POSTGRES_USER:-parabench}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-parabench2024}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-parabench}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - parabench_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: parabench_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - parabench_net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: parabench_backend
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-parabench}:${POSTGRES_PASSWORD:-parabench2024}@postgres:5432/${POSTGRES_DB:-parabench}
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY: ${SECRET_KEY:-supersecretkey2024parabench}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    volumes:
+      - ./backend:/app
+      - scraping_logs:/app/logs
+      - exports_data:/app/exports
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - parabench_net
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: parabench_frontend
+    environment:
+      REACT_APP_API_URL: ${REACT_APP_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - parabench_net
+    restart: unless-stopped
+
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: parabench_celery
+    command: celery -A services.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-parabench}:${POSTGRES_PASSWORD:-parabench2024}@postgres:5432/${POSTGRES_DB:-parabench}
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - ./backend:/app
+      - scraping_logs:/app/logs
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - parabench_net
+    restart: unless-stopped
+
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: parabench_beat
+    command: celery -A services.celery_app beat --loglevel=info
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-parabench}:${POSTGRES_PASSWORD:-parabench2024}@postgres:5432/${POSTGRES_DB:-parabench}
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - parabench_net
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    container_name: parabench_nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - parabench_net
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  scraping_logs:
+  exports_data:
+
+networks:
+  parabench_net:
+    driver: bridge
